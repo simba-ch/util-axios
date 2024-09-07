@@ -1,4 +1,4 @@
-import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, CreateAxiosDefaults, Method } from 'axios';
+import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, CanceledError, CreateAxiosDefaults, isCancel, Method } from 'axios';
 //WebApi接口地址
 const BASEAPI = 'http://localhost:3000';
 
@@ -14,18 +14,11 @@ const axiosDefaultConfig: CreateAxiosDefaults = Object.freeze({
 
 
 type RequestConfig = {
-    url: string,
-    beforeSend?: () => Promise<void>,
-    completeSend?: () => Promise<void>,
-    method?: Method | 'file' | 'FILE' | 'download' | 'DOWNLOAD',
-    data?: any
-    // `onUploadProgress` 允许为上传处理进度事件
-    // 浏览器专属
-    onUploadProgress?: AxiosRequestConfig['onUploadProgress'],
-    // `onDownloadProgress` 允许为下载处理进度事件
-    // 浏览器专属
-    onDownloadProgress?: AxiosRequestConfig['onDownloadProgress'],
-} & RequestCallbackConfig & RequestErrorConfig;
+    url: string, //请求网址
+    beforeSend?: () => Promise<void>,//请求发送前的调用函数
+    completeSend?: () => Promise<void>,//请求发送后的调用函数
+    method?: Method | 'file' | 'FILE' | 'download' | 'DOWNLOAD',//请求方法
+} & RequestCallbackConfig & RequestErrorConfig & AxiosRequestConfig;
 
 
 const requestDefaultConfig: RequestConfig = Object.freeze({
@@ -33,7 +26,7 @@ const requestDefaultConfig: RequestConfig = Object.freeze({
 })
 
 type RequestCallbackConfig = {
-    success?: (res: AxiosResponse) => Promise<void>
+    success?: (res: AxiosResponse) => Promise<void> //请求成功的回调
 }
 const requestCallback = async (response: AxiosResponse, callbackConfig: RequestCallbackConfig) => {
     // 成功响应
@@ -46,12 +39,17 @@ const requestCallback = async (response: AxiosResponse, callbackConfig: RequestC
 
 
 type RequestErrorConfig = {
-    next?: boolean,
-    error?: (AxiosResponse) => void;
+    next?: boolean, //请求是否需要继续处理，true将返回一个reject promise继续下一步处理
+    error?: (res: AxiosResponse) => void; //请求失败的回调
+    cancelHandle?: (err: CanceledError<unknown>) => void; //请求取消的回调
 }
 const requestErrorHandle = async (error: AxiosError, errConfig: RequestErrorConfig) => {
-    const { error: errorHandle } = errConfig
-
+    const { error: errorHandle, cancelHandle } = errConfig
+    if (isCancel(error)) {
+        cancelHandle && cancelHandle(error)
+        return
+    }
+    error = error as AxiosError // 为error添加类型
     if (error.response) {
         // 请求成功发出且服务器也响应了状态码，但状态代码超出了 2xx 的范围
         errorHandle && errorHandle(error.response)
@@ -72,7 +70,7 @@ const requestErrorHandle = async (error: AxiosError, errConfig: RequestErrorConf
 
     if (errConfig.next) {
         // 如果next为true，表示需要进一步处理，抛出错误
-        throw error
+        return Promise.reject(error)
     }
 
 }
@@ -87,42 +85,43 @@ const requestFactory = (
 
 
     const requestHandle = async (config = requestConfig) => {
-        const { url, beforeSend, completeSend, method, data, success, onUploadProgress, onDownloadProgress, error, next } = config
+        const { url, beforeSend, completeSend, method, data, success, error, next, cancelHandle, ...resetConfig } = config
         const callbackConfig: RequestCallbackConfig = {
             success
         }
         const errorConfig: RequestErrorConfig = {
             error,
-            next
+            next,
+            cancelHandle
         }
+
         beforeSend && beforeSend()
 
-        if (!method || method === 'get') {
+        if (!method || method.toLowerCase() === 'get') {
             if (data) {
                 axiosInstance.get(url, {
-                    params: data
+                    params: data,
+                    ...resetConfig
                 })
                     .then((res) => requestCallback(res, callbackConfig))
                     .catch((err) => requestErrorHandle(err, errorConfig))
                     .finally(completeSend)
             } else {
-                axiosInstance.get(url)
+                axiosInstance.get(url, resetConfig)
                     .then((res) => requestCallback(res, callbackConfig))
                     .catch((err) => requestErrorHandle(err, errorConfig))
                     .finally(completeSend)
             }
         } else {
             if (method.toLowerCase() === 'file') {
-                axiosInstance.postForm(url, data, {
-                    onUploadProgress,
-                    onDownloadProgress
-                })
+                axiosInstance.postForm(url, data, resetConfig)
                     .then((res) => requestCallback(res, callbackConfig))
                     .catch((err) => requestErrorHandle(err, errorConfig))
                     .finally(completeSend)
             } else if (method.toLowerCase() === 'download') {
                 axiosInstance.get(url, {
-                    responseType: 'blob'
+                    responseType: 'blob',
+                    ...resetConfig
                 })
                     .then((res) => requestCallback(res, callbackConfig))
                     .catch((err) => requestErrorHandle(err, errorConfig))
@@ -131,7 +130,8 @@ const requestFactory = (
                 axiosInstance({
                     url,
                     method,
-                    data
+                    data,
+                    ...resetConfig
                 })
                     .then((res) => requestCallback(res, callbackConfig))
                     .catch((err) => requestErrorHandle(err, errorConfig))
